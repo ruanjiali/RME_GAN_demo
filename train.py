@@ -11,7 +11,9 @@ use loadersUNETCGAN_f woth fix_sample = 1
 """
 
 from __future__ import print_function, division
+import argparse
 import os
+import random
 import torch
 import pandas as pd
 from skimage import io, transform
@@ -125,7 +127,7 @@ def ohe_vector_from_labels(labels, n_classes):
     return F.one_hot(labels, num_classes=n_classes)
 
 class GANTrain():
-    def __init__(self,netD,netG,trainset,valset= [],testset =[],phase='first',batchsize = 15, experiment_path=''):
+    def __init__(self,netD,netG,trainset,valset= [],testset =[],phase='first',batchsize = 15, num_workers=2, experiment_path=''):
         self.cuda = torch.cuda.is_available()
         self.device = torch.device('cuda:0' if self.cuda else 'cpu')
         self.batch_sz = batchsize
@@ -135,7 +137,7 @@ class GANTrain():
         self.trainset = trainset
         self.testset = testset
         self.valset = valset
-        self.lossD = nn.BCEWithLogitsLoss()
+        self.lossD = nn.BCELoss()
         self.lossG = nn.MSELoss()#nn.L1Loss()#nn.MSELoss()
         self.lossGS = nn.CosineSimilarity(dim=1, eps=1e-08)
         self.lossMsSSIM = loss.MS_SSIM_L1_LOSS()
@@ -144,25 +146,89 @@ class GANTrain():
         self.netD = netD.to(self.device)#Discriminator(self.device).to(self.device)
         self.optimG = torch.optim.Adam(self.netG.parameters(),lr=0.001, betas=(0.9, 0.999))
         self.optimD = torch.optim.Adam(self.netD.parameters(),lr=0.001, betas=(0.9, 0.999))
-        self.train_loader = torch.utils.data.DataLoader(self.trainset,batch_size=self.batch_sz,shuffle=False,num_workers=2)
-        self.test_loader = torch.utils.data.DataLoader(self.testset,batch_size=self.batch_sz,shuffle=False,num_workers=2)
-        self.val_loader = torch.utils.data.DataLoader(self.valset,batch_size=self.batch_sz,shuffle=False,num_workers=2)
+        self.train_loader = torch.utils.data.DataLoader(self.trainset,batch_size=self.batch_sz,shuffle=True,num_workers=num_workers)
+        self.test_loader = torch.utils.data.DataLoader(self.testset,batch_size=self.batch_sz,shuffle=False,num_workers=num_workers)
+        self.val_loader = torch.utils.data.DataLoader(self.valset,batch_size=self.batch_sz,shuffle=False,num_workers=num_workers)
         self.experiment_path = experiment_path
         
-    def  model_train(self,epochs=10):
+    def _move_optimizer_state_to_device(self, optimizer):
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if torch.is_tensor(v):
+                    state[k] = v.to(self.device)
+
+    def save_checkpoint(self, checkpoint_path, epoch, best_loss, best_i):
+        checkpoint = {
+            "epoch": epoch,
+            "best_loss": best_loss,
+            "best_i": best_i,
+            "netG": self.netG.state_dict(),
+            "netD": self.netD.state_dict(),
+            "optimG": self.optimG.state_dict(),
+            "optimD": self.optimD.state_dict(),
+            "lossDL_m": self.lossDL_m,
+            "lossGL_m": self.lossGL_m,
+            "lossMSE_m": self.lossMSE_m,
+            "val_loss_m": self.val_loss_m,
+            "rng_torch": torch.get_rng_state(),
+            "rng_numpy": np.random.get_state(),
+            "rng_python": random.getstate(),
+        }
+        if self.cuda:
+            checkpoint["rng_torch_cuda"] = torch.cuda.get_rng_state_all()
+        torch.save(checkpoint, checkpoint_path)
+
+    def load_checkpoint(self, checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        self.netG.load_state_dict(checkpoint["netG"])
+        self.netD.load_state_dict(checkpoint["netD"])
+        self.optimG.load_state_dict(checkpoint["optimG"])
+        self.optimD.load_state_dict(checkpoint["optimD"])
+        self._move_optimizer_state_to_device(self.optimG)
+        self._move_optimizer_state_to_device(self.optimD)
+
+        self.lossDL_m = checkpoint.get("lossDL_m", [])
+        self.lossGL_m = checkpoint.get("lossGL_m", [])
+        self.lossMSE_m = checkpoint.get("lossMSE_m", [])
+        self.val_loss_m = checkpoint.get("val_loss_m", [])
+
+        if "rng_torch" in checkpoint:
+            torch.set_rng_state(checkpoint["rng_torch"])
+        if "rng_torch_cuda" in checkpoint and self.cuda:
+            torch.cuda.set_rng_state_all(checkpoint["rng_torch_cuda"])
+        if "rng_numpy" in checkpoint:
+            np.random.set_state(checkpoint["rng_numpy"])
+        if "rng_python" in checkpoint:
+            random.setstate(checkpoint["rng_python"])
+
+        start_epoch = int(checkpoint.get("epoch", -1)) + 1
+        best_loss = float(checkpoint.get("best_loss", 100.0))
+        best_i = int(checkpoint.get("best_i", 0))
+        return start_epoch, best_loss, best_i
+
+    def  model_train(self, epochs=10, resume_path=None, save_every=1):
         self.lossDL = []
         self.lossGL = []
         self.lossMSE = []
-        self.lossDL_m = []
-        self.lossGL_m = []
-        self.lossMSE_m = []
-        self.val_loss_m = []
+        if not hasattr(self, "lossDL_m"):
+            self.lossDL_m = []
+        if not hasattr(self, "lossGL_m"):
+            self.lossGL_m = []
+        if not hasattr(self, "lossMSE_m"):
+            self.lossMSE_m = []
+        if not hasattr(self, "val_loss_m"):
+            self.val_loss_m = []
+
+        start_epoch = 0
+        best_loss = 100.0
+        best_i = 0
+        if resume_path is not None:
+            start_epoch, best_loss, best_i = self.load_checkpoint(resume_path)
+
         best_model_wts_G = copy.deepcopy(self.netG.state_dict())
         best_model_wts_D = copy.deepcopy(self.netD.state_dict())
-        best_loss = 100
-        i = 0
         # Dense training
-        for epoch in tqdm(range(epochs),unit='epochs'):
+        for epoch in tqdm(range(start_epoch, epochs), unit='epochs'):
             if epoch%25==0:
                 for g in self.optimG.param_groups:
                     g['lr'] = g['lr'] /10
@@ -171,6 +237,7 @@ class GANTrain():
             print('learning rate gen:',g['lr'] ,' learning rate dis:',d['lr'])
             for number,(inps, gts) in enumerate(self.train_loader):
                 inps, gts = inps.to(self.device),gts.to(self.device)
+                cur_bs = inps.shape[0]
                 up_sampled = inps[:,3,:,:].unsqueeze(1)
                 inps = inps[:,:3,:,:]
                 
@@ -181,8 +248,8 @@ class GANTrain():
                 # Train the Discriminator  #
                 ############################
                 
-                one_hot_labelsF = ohe_vector_from_labels(torch.tensor([0]*self.batch_sz).to(self.device),2)
-                one_hot_labelsR = ohe_vector_from_labels(torch.tensor([1]*self.batch_sz).to(self.device),2)
+                one_hot_labelsF = ohe_vector_from_labels(torch.zeros(cur_bs, dtype=torch.long, device=self.device), 2)
+                one_hot_labelsR = ohe_vector_from_labels(torch.ones(cur_bs, dtype=torch.long, device=self.device), 2)
 #                 print(one_hot_labelsF) # [1,2]
 #                 print(one_hot_labelsR)
 #                 print(one_hot_labelsR.shape)
@@ -211,7 +278,7 @@ class GANTrain():
                 #print(predD_fake.shape)
                 # print(predD_real.shape)
                 lossD_fake = self.lossD(predD_fake,torch.zeros_like(predD_fake))
-                lossD_real = self.lossD(predD_real,torch.zeros_like(predD_real))
+                lossD_real = self.lossD(predD_real,torch.ones_like(predD_real))
 
                 lossDT = (lossD_fake + lossD_real)/2
 
@@ -268,15 +335,15 @@ class GANTrain():
                     lossTV = tvloss(fake)
                     ##print('lossTV: ',lossTV)
                     # I donot get the super pixels of fake only the x sparse
-                    segmentsi = torch.zeros(self.batch_sz,self.c)
-                    segmentf = torch.zeros(self.batch_sz,self.c)
-                    for i in range(self.batch_sz):
-                        inps = inps.detach().cpu()
-                        si = slic(inps[i,2,:,:], n_segments = self.n_segments, sigma = 5, channel_axis=None)
+                    segmentsi = torch.zeros(cur_bs, self.c)
+                    segmentf = torch.zeros(cur_bs, self.c)
+                    inps_cpu = inps.detach().cpu()
+                    for i in range(cur_bs):
+                        si = slic(inps_cpu[i,2,:,:], n_segments = self.n_segments, sigma = 5, channel_axis=None)
                         for n,j in enumerate(np.unique(si)):
                             x,y = np.where(si == j)
-                            xm,ym = np.unravel_index(np.argmax(inps[i,2,:,:][x,y], axis=None), inps[i,2,:,:].shape)
-                            segmentsi[i][n] = inps[i,2,:,:][xm,ym]
+                            xm,ym = np.unravel_index(np.argmax(inps_cpu[i,2,:,:][x,y], axis=None), inps_cpu[i,2,:,:].shape)
+                            segmentsi[i][n] = inps_cpu[i,2,:,:][xm,ym]
                             #print('shape: ',inps[i,2,:,:][xm,ym].shape,fake[i,0,xm,ym].shape,fake[i].shape)
                             segmentf[i][n] = fake[i,0,xm,ym]
                     lossC = self.lossL1(segmentsi.to(self.device),segmentf.to(self.device))
@@ -329,77 +396,87 @@ class GANTrain():
                     print("val MSE: ",val)
                     best_model_wts_D = copy.deepcopy(self.netD.state_dict())
                     best_model_wts_G = copy.deepcopy(self.netG.state_dict())
-                    G_file = os.path.join(self.experiment_path, f'Trained_ModelMSE_Gen_best_{i}.wgt')
-                    D_file = os.path.join(self.experiment_path, f'Trained_ModelMSE_Dis_best_{i}.wgt')
+                    G_file = os.path.join(self.experiment_path, f'Trained_ModelMSE_Gen_best_{best_i}.wgt')
+                    D_file = os.path.join(self.experiment_path, f'Trained_ModelMSE_Dis_best_{best_i}.wgt')
                     torch.save(self.netG.state_dict(), G_file)
                     torch.save(self.netD.state_dict(), D_file)
-                    i+=1
-        return best_model_wts_D,best_model_wts_G
+                    best_i += 1
+
+            if save_every is not None and save_every > 0 and ((epoch + 1) % save_every == 0 or (epoch + 1) == epochs):
+                ckpt_last = os.path.join(self.experiment_path, "checkpoint_last.pt")
+                self.save_checkpoint(ckpt_last, epoch=epoch, best_loss=best_loss, best_i=best_i)
+
+        return best_model_wts_D, best_model_wts_G
                     
         #torch.save(model.state_dict(), 'RadioWNet_c_DPM_Thr2/Trained_Model_FirstU.pt')
 
-########################
-# Load dataset         #
-########################
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset_dir", default=None)
+    parser.add_argument("--dataset", default="radiounet", choices=["radiounet", "radiomapseer_polygon"])
+    parser.add_argument("--setup", type=int, default=1, choices=[1, 2, 3])
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--batch_size", type=int, default=30)
+    parser.add_argument("--num_workers", type=int, default=2)
+    parser.add_argument("--exp_index", type=int, default=1)
+    parser.add_argument("--phase", default="first", choices=["first", "second"])
+    parser.add_argument("--resume", default=None)
+    parser.add_argument("--save_every", type=int, default=1)
+    args = parser.parse_args()
 
-# Setup 1 - uniform 1%
-# Setup 2 - twoside 1% and 10%
-# Setup 3 - nonuniform 1% to 10%
+    setups = ['uniform', 'twoside', 'nonuniform']
+    setup_name = setups[args.setup-1]
 
-setup = 1       # REVISE index of setup
-setups = ['uniform', 'twoside', 'nonuniform']
-setup_name = setups[setup-1]
+    if args.dataset == "radiounet":
+        if args.setup == 1:
+            Radio_train = loaders.RadioUNet_s(phase="train", fix_samples=655, num_samples_low=10, num_samples_high=300, dir_dataset=args.dataset_dir)
+            Radio_val = loaders.RadioUNet_s(phase="val", fix_samples=655, num_samples_low=10, num_samples_high=300, dir_dataset=args.dataset_dir)
+            Radio_test = loaders.RadioUNet_s(phase="test", fix_samples=655, num_samples_low=10, num_samples_high=300, dir_dataset=args.dataset_dir)
+        elif args.setup == 2:
+            Radio_train = loaders.RadioUNet_s(phase="train", fix_samples=1, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
+            Radio_val = loaders.RadioUNet_s(phase="val", fix_samples=1, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
+            Radio_test = loaders.RadioUNet_s(phase="test", fix_samples=1, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
+        else:
+            Radio_train = loaders.RadioUNet_s(phase="train", fix_samples=0, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
+            Radio_val = loaders.RadioUNet_s(phase="val", fix_samples=0, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
+            Radio_test = loaders.RadioUNet_s(phase="test", fix_samples=0, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
+    else:
+        if args.setup == 1:
+            Radio_train = loaders.RadioMapSeerPolygon(phase="train", fix_samples=655, num_samples_low=10, num_samples_high=300, dir_dataset=args.dataset_dir)
+            Radio_val = loaders.RadioMapSeerPolygon(phase="val", fix_samples=655, num_samples_low=10, num_samples_high=300, dir_dataset=args.dataset_dir)
+            Radio_test = loaders.RadioMapSeerPolygon(phase="test", fix_samples=655, num_samples_low=10, num_samples_high=300, dir_dataset=args.dataset_dir)
+        elif args.setup == 2:
+            Radio_train = loaders.RadioMapSeerPolygon(phase="train", fix_samples=1, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
+            Radio_val = loaders.RadioMapSeerPolygon(phase="val", fix_samples=1, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
+            Radio_test = loaders.RadioMapSeerPolygon(phase="test", fix_samples=1, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
+        else:
+            Radio_train = loaders.RadioMapSeerPolygon(phase="train", fix_samples=0, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
+            Radio_val = loaders.RadioMapSeerPolygon(phase="val", fix_samples=0, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
+            Radio_test = loaders.RadioMapSeerPolygon(phase="test", fix_samples=0, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
 
-if setup == 1:          
-    Radio_train = loaders.RadioUNet_s(phase="train", fix_samples=655, num_samples_low=10, num_samples_high=300)
-    Radio_val = loaders.RadioUNet_s(phase="val", fix_samples=655, num_samples_low=10, num_samples_high=300)
-    Radio_test = loaders.RadioUNet_s(phase="test", fix_samples=655, num_samples_low=10, num_samples_high=300)
-    
-elif setup == 2:
-    Radio_train = loaders.RadioUNet_s(phase="train", fix_samples=1, num_samples_low=655, num_samples_high=655*10)
-    Radio_val = loaders.RadioUNet_s(phase="val", fix_samples=1, num_samples_low=655, num_samples_high=655*10)
-    Radio_test = loaders.RadioUNet_s(phase="test", fix_samples=1, num_samples_low=655, num_samples_high=655*10)
-    
-else:
-    Radio_train = loaders.RadioUNet_s(phase="train", fix_samples=0, num_samples_low=655, num_samples_high=655*10)
-    Radio_val = loaders.RadioUNet_s(phase="val", fix_samples=0, num_samples_low=655, num_samples_high=655*10)
-    Radio_test = loaders.RadioUNet_s(phase="test", fix_samples=0, num_samples_low=655, num_samples_high=655*10)
-    
-image_datasets = {
-    'train': Radio_train, 'val': Radio_val
-}
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    print(device)
 
-batch_size = 30
+    exp_path = f"{args.dataset}_{setup_name}_{args.exp_index}"
+    os.makedirs(exp_path, exist_ok=True)
+
+    torch.set_default_dtype(torch.float32)
+
+    netG = modules.RadioWNet(phase="firstU")
+    netD = Discriminator(device)
+
+    RadioGAN = GANTrain(netD, netG, Radio_train, Radio_val, Radio_test, phase=args.phase, batchsize=args.batch_size, num_workers=args.num_workers, experiment_path=exp_path)
+    resume_path = None
+    if args.resume is not None:
+        resume_path = os.path.join(exp_path, "checkpoint_last.pt") if args.resume == "auto" else args.resume
+    bestD, bestG = RadioGAN.model_train(epochs=args.epochs, resume_path=resume_path, save_every=args.save_every)
+
+    np.savetxt(os.path.join(exp_path, "MSE_train.csv"), RadioGAN.lossMSE_m, delimiter=",")
+    np.savetxt(os.path.join(exp_path, "MSE_val.csv"), RadioGAN.val_loss_m, delimiter=",")
+
+    torch.save(bestD, os.path.join(exp_path, 'Trained_ModelMSE_D.pt'))
+    torch.save(bestG, os.path.join(exp_path, 'Trained_ModelMSE_G.pt'))
 
 
-dataloaders = {
-    'train': DataLoader(Radio_train, batch_size=batch_size, shuffle=True, num_workers=1),
-    'val': DataLoader(Radio_val, batch_size=batch_size, shuffle=True, num_workers=1)
-}            
-
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-print(device)
-
-exp_index = 1           # REVISE index of experiment
-exp_path = f"{setup_name}_{exp_index}"
-
-# Ensure the directory exists before saving
-os.makedirs(exp_path, exist_ok=True)
-
-torch.set_default_dtype(torch.float32)
-torch.set_default_tensor_type('torch.cuda.FloatTensor')
-torch.backends.cudnn.enabled
-#netG = ResnetGenerator(input_nc=2,output_nc=1,ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False, n_blocks=6)
-netG = modules.RadioWNet(phase="firstU")#.to(device)
-#netG.load_state_dict(torch.load('UNetCGANDEBUG/Trained_ModelMSE_G2.pt'))
-netD = Discriminator(device)
-#netD.load_state_dict(torch.load('UNetCGANDEBUG/Trained_ModelMSE_D2.pt'))
-
-RadioGAN = GANTrain(netD,netG,Radio_train,Radio_val,Radio_test,phase='first',experiment_path=exp_path)
-bestD,bestG = RadioGAN.model_train(epochs=50)
-
-np.savetxt(os.path.join(exp_path, "MSE_train.csv"), RadioGAN.lossMSE_m, delimiter=",")  
-np.savetxt(os.path.join(exp_path, "MSE_val.csv"), RadioGAN.val_loss_m, delimiter=",") 
-
-torch.save(bestD, os.path.join(exp_path, 'Trained_ModelMSE_D.pt'))
-torch.save(bestG, os.path.join(exp_path, 'Trained_ModelMSE_G.pt'))                
+if __name__ == "__main__":
+    main()

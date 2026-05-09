@@ -1,10 +1,12 @@
 from __future__ import print_function, division
+import json
 import os
 import torch
 import pandas as pd
 from skimage import io, transform
 import numpy as np
 import matplotlib.pyplot as plt
+from PIL import Image, ImageDraw
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, utils, datasets, models
 import warnings
@@ -17,7 +19,7 @@ class RadioUNet_s(Dataset):
     And we assume a fixed sample size of 1% of 256x256"""
     def __init__(self,maps_inds=np.zeros(1), phase="train",
                  ind1=0,ind2=0, 
-                 dir_dataset="/home/steven/Documents/radiomap/RadioMapSeer/",    # path to dataset
+                 dir_dataset=None,
                  numTx=80,                  
                  thresh=0.2,
                  simulation="DPM",
@@ -82,6 +84,11 @@ class RadioUNet_s(Dataset):
             self.ind1=ind1
             self.ind2=ind2
             
+        if dir_dataset is None:
+            dir_dataset = os.environ.get("RME_DATASET_DIR", os.path.join(".", "data", "RadioMapSeer"))
+        dir_dataset = os.path.normpath(dir_dataset)
+        if not dir_dataset.endswith(os.sep):
+            dir_dataset = dir_dataset + os.sep
         self.dir_dataset = dir_dataset
         self.numTx=  numTx                
         self.thresh=thresh
@@ -95,30 +102,30 @@ class RadioUNet_s(Dataset):
 
         if simulation=="DPM" :
             if carsSimul=="no":
-                self.dir_gain=self.dir_dataset+"gain/DPM/"
+                self.dir_gain=os.path.join(self.dir_dataset, "gain", "DPM") + os.sep
             else:
-                self.dir_gain=self.dir_dataset+"gain/carsDPM/"
+                self.dir_gain=os.path.join(self.dir_dataset, "gain", "carsDPM") + os.sep
         elif simulation=="IRT2":
             if carsSimul=="no":
-                self.dir_gain=self.dir_dataset+"gain/IRT2/"
+                self.dir_gain=os.path.join(self.dir_dataset, "gain", "IRT2") + os.sep
             else:
-                self.dir_gain=self.dir_dataset+"gain/carsIRT2/"
+                self.dir_gain=os.path.join(self.dir_dataset, "gain", "carsIRT2") + os.sep
         elif  simulation=="rand":
             if carsSimul=="no":
-                self.dir_gainDPM=self.dir_dataset+"gain/DPM/"
-                self.dir_gainIRT2=self.dir_dataset+"gain/IRT2/"
+                self.dir_gainDPM=os.path.join(self.dir_dataset, "gain", "DPM") + os.sep
+                self.dir_gainIRT2=os.path.join(self.dir_dataset, "gain", "IRT2") + os.sep
             else:
-                self.dir_gainDPM=self.dir_dataset+"gain/carsDPM/"
-                self.dir_gainIRT2=self.dir_dataset+"gain/carsIRT2/"
+                self.dir_gainDPM=os.path.join(self.dir_dataset, "gain", "carsDPM") + os.sep
+                self.dir_gainIRT2=os.path.join(self.dir_dataset, "gain", "carsIRT2") + os.sep
         
         self.IRT2maxW=IRT2maxW
         
         self.cityMap=cityMap
         self.missing=missing
         if cityMap=="complete":
-            self.dir_buildings=self.dir_dataset+"png/buildings_complete/"
+            self.dir_buildings=os.path.join(self.dir_dataset, "png", "buildings_complete") + os.sep
         else:
-            self.dir_buildings = self.dir_dataset+"png/buildings_missing" # a random index will be concatenated in the code
+            self.dir_buildings = os.path.join(self.dir_dataset, "png", "buildings_missing") # a random index will be concatenated in the code
         #else:  #missing==number
         #    self.dir_buildings = self.dir_dataset+ "png/buildings_missing"+str(missing)+"/"
             
@@ -129,10 +136,10 @@ class RadioUNet_s(Dataset):
                 
         self.transform= transform
         
-        self.dir_Tx = self.dir_dataset+ "png/antennas/" 
+        self.dir_Tx = os.path.join(self.dir_dataset, "png", "antennas") + os.sep
         #later check if reading the JSON file and creating antenna images on the fly is faster
         if carsInput!="no":
-            self.dir_cars = self.dir_dataset+ "png/cars/" 
+            self.dir_cars = os.path.join(self.dir_dataset, "png", "cars") + os.sep
         
         self.height = 256
         self.width = 256
@@ -247,3 +254,154 @@ class RadioUNet_s(Dataset):
             #note that ToTensor moves the channel from the last asix to the first!
 
         return [inputs, image_gain]
+
+
+def _rasterize_polygons(polygons, height=256, width=256):
+    mask = Image.new("L", (width, height), 0)
+    draw = ImageDraw.Draw(mask)
+    for poly in polygons:
+        if not poly:
+            continue
+        pts = []
+        for p in poly:
+            if len(p) < 2:
+                continue
+            x = int(round(p[0]))
+            y = int(round(p[1]))
+            x = 0 if x < 0 else (width - 1 if x >= width else x)
+            y = 0 if y < 0 else (height - 1 if y >= height else y)
+            pts.append((x, y))
+        if len(pts) >= 3:
+            draw.polygon(pts, fill=255)
+    return np.asarray(mask, dtype=np.float32) / 255.0
+
+
+class RadioMapSeerPolygon(Dataset):
+    def __init__(
+        self,
+        phase="train",
+        dir_dataset=None,
+        thresh=0.2,
+        fix_samples=655,
+        num_samples_low=10,
+        num_samples_high=300,
+        transform=transforms.ToTensor(),
+        buildings_variant="buildings_complete",
+    ):
+        if dir_dataset is None:
+            dir_dataset = os.environ.get("RME_DATASET_DIR", os.path.join(".", "RadioMapSeer"))
+        self.dir_dataset = os.path.normpath(dir_dataset)
+        self.phase = phase
+        self.thresh = thresh
+        self.fix_samples = fix_samples
+        self.num_samples_low = num_samples_low
+        self.num_samples_high = num_samples_high
+        self.transform = transform
+        self.height = 256
+        self.width = 256
+        self.arr = np.arange(self.height)
+        self.one = np.ones(self.width)
+        self.img = np.outer(self.arr, self.one)
+
+        maps = np.arange(0, 701, 1, dtype=np.int16)
+        np.random.seed(42)
+        np.random.shuffle(maps)
+        if phase == "train":
+            self.maps = maps[0:501]
+        elif phase == "val":
+            self.maps = maps[501:601]
+        elif phase == "test":
+            self.maps = maps[601:701]
+        else:
+            self.maps = maps
+
+        self.dir_gain = os.path.join(self.dir_dataset, "gain", "DPM")
+        self.dir_antenna = os.path.join(self.dir_dataset, "antenna")
+        self.dir_buildings_poly = os.path.join(self.dir_dataset, "polygon", buildings_variant)
+
+        ant0 = os.path.join(self.dir_antenna, "0.json")
+        with open(ant0, "r", encoding="utf-8") as f:
+            self.numTx = len(json.load(f))
+
+    def __len__(self):
+        return len(self.maps) * self.numTx
+
+    def __getitem__(self, idx):
+        map_pos = int(idx // self.numTx)
+        tx_idx = int(idx - map_pos * self.numTx)
+        map_id = int(self.maps[map_pos])
+
+        buildings_path = os.path.join(self.dir_buildings_poly, f"{map_id}.json")
+        with open(buildings_path, "r", encoding="utf-8") as f:
+            buildings_polys = json.load(f)
+        image_buildings = _rasterize_polygons(buildings_polys, height=self.height, width=self.width)
+
+        ant_path = os.path.join(self.dir_antenna, f"{map_id}.json")
+        with open(ant_path, "r", encoding="utf-8") as f:
+            tx_points = json.load(f)
+        tx = tx_points[tx_idx]
+        tx_r = int(round(tx[0]))
+        tx_c = int(round(tx[1]))
+        tx_r = 0 if tx_r < 0 else (self.height - 1 if tx_r >= self.height else tx_r)
+        tx_c = 0 if tx_c < 0 else (self.width - 1 if tx_c >= self.width else tx_c)
+        image_Tx = np.zeros((self.height, self.width), dtype=np.float32)
+        image_Tx[tx_r, tx_c] = 1.0
+
+        gain_path = os.path.join(self.dir_gain, f"{map_id}_{tx_idx}.png")
+        gain_img = np.asarray(Image.open(gain_path).convert("L"), dtype=np.float32) / 256.0
+        image_gain = np.expand_dims(gain_img, axis=2)
+
+        if self.thresh > 0:
+            mask = image_gain < self.thresh
+            image_gain[mask] = self.thresh
+            image_gain = image_gain - self.thresh * np.ones(np.shape(image_gain))
+            image_gain = image_gain / (1 - self.thresh)
+        image_gain = image_gain * 256.0
+
+        image_samples = np.zeros((self.height, self.width), dtype=np.float32)
+        if self.fix_samples == 0:
+            num_samples = int(np.random.randint(self.num_samples_low, self.num_samples_high, size=1)[0])
+        else:
+            num_samples = int(np.floor(self.fix_samples))
+        x_samples = np.random.randint(0, self.height - 1, size=num_samples)
+        y_samples = np.random.randint(0, self.width - 1, size=num_samples)
+
+        if self.fix_samples == 1:
+            side = np.random.randint(0, 2)
+            if side == 1:
+                x_samples = np.append(np.random.randint(0, 128, size=6550), np.random.randint(128, 255, size=655))
+                y_samples = np.random.randint(0, 255, size=6550 + 655)
+            else:
+                x_samples = np.append(np.random.randint(0, 128, size=655), np.random.randint(128, 255, size=6550))
+                y_samples = np.random.randint(0, 255, size=6550 + 655)
+
+        image_samples[x_samples, y_samples] = image_gain[x_samples, y_samples, 0]
+
+        def objective(x, theta, c):
+            return c - 10 * theta * x
+
+        xk, yk = np.where(image_samples != 0)
+        if xk.size == 0:
+            genImg = np.zeros((self.height, self.width), dtype=np.float32)
+        else:
+            x = np.log10(np.sqrt(np.square(xk - tx_r) + np.square(yk - tx_c)) + 1e-30).flatten()
+            y = image_samples[xk, yk].flatten()
+            try:
+                pop, _ = curve_fit(objective, x, y, maxfev=2000)
+                theta, c = pop
+                genImg = c - 10 * theta * np.log10(
+                    np.sqrt(np.square(tx_r - self.img) + np.square(tx_c - self.img.T)) + 1e-30
+                )
+            except Exception:
+                genImg = np.zeros((self.height, self.width), dtype=np.float32)
+
+        inputs = np.stack([image_buildings, image_Tx, image_samples, genImg], axis=2)
+
+        if self.transform:
+            inputs = self.transform(inputs).type(torch.float32)
+            image_gain_t = self.transform(image_gain).type(torch.float32)
+        else:
+            inputs = torch.from_numpy(np.transpose(inputs, (2, 0, 1))).type(torch.float32)
+            image_gain_t = torch.from_numpy(np.transpose(image_gain, (2, 0, 1))).type(torch.float32)
+
+        return [inputs, image_gain_t]

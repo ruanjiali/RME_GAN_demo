@@ -6,164 +6,243 @@ Created on Thu Jun  2 10:52:13 2022
 """
 
 from __future__ import print_function, division
+import argparse
 import os
+import json
 import torch
-import pandas as pd
-from skimage import io, transform
 import numpy as np
-import matplotlib.pyplot as plt
-from PIL import Image
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms, utils, models, datasets
+from torch.utils.data import DataLoader
 from torchvision.utils import save_image
-from lib import loaders, modules #, loadersUNETCGAN_f_unet - for baseline
-import torch.optim as optim
-from torch.optim import lr_scheduler
 import time
-import copy
-from collections import defaultdict
-import torch.nn.functional as F
-import torch.nn as nn
-from lib.EncoderModels import ResnetGenerator, Discriminator
-from tqdm import tqdm
-#############################################################
-# For test evaluations 
-############################################################
-
-########################
-# Load dataset         #
-########################
-# Setup 1 - uniform 1%
-# Setup 2 - twoside 1% and 10%
-# Setup 3 - nonuniform 1% to 10%
-
-train_setup = 1         # REVISE index of training setup
-test_setup = 3          # REVISE index of testing setup
-setups = ['uniform', 'twoside', 'nonuniform']
-setup_name = setups[train_setup-1]
-test_name = setups[test_setup-1]
+from lib import loaders, modules
 
 
-if test_setup == 1:          
-    Radio_train = loaders.RadioUNet_s(phase="train", fix_samples=655, num_samples_low=10, num_samples_high=300)
-    Radio_val = loaders.RadioUNet_s(phase="val", fix_samples=655, num_samples_low=10, num_samples_high=300)
-    Radio_test = loaders.RadioUNet_s(phase="test", fix_samples=655, num_samples_low=10, num_samples_high=300)
-    
-elif test_setup == 2:
-    Radio_train = loaders.RadioUNet_s(phase="train", fix_samples=1, num_samples_low=655, num_samples_high=655*10)
-    Radio_val = loaders.RadioUNet_s(phase="val", fix_samples=1, num_samples_low=655, num_samples_high=655*10)
-    Radio_test = loaders.RadioUNet_s(phase="test", fix_samples=1, num_samples_low=655, num_samples_high=655*10)
-
-else:
-    Radio_train = loaders.RadioUNet_s(phase="train", fix_samples=0, num_samples_low=655, num_samples_high=655*10)
-    Radio_val = loaders.RadioUNet_s(phase="val", fix_samples=0, num_samples_low=655, num_samples_high=655*10)
-    Radio_test = loaders.RadioUNet_s(phase="test", fix_samples=0, num_samples_low=655, num_samples_high=655*10)
+def _to_db(x, value_scale, value_offset, db_min, db_max):
+    x = x * value_scale + value_offset
+    if db_min is None or db_max is None:
+        return x
+    return (x / 256.0) * (db_max - db_min) + db_min
 
 
-image_datasets = {
-    'train': Radio_train, 'val': Radio_val
-}
-
-batch_size = 15
+def _ensure_dir(path):
+    if path:
+        os.makedirs(path, exist_ok=True)
 
 
-dataloaders = {
-    'train': DataLoader(Radio_train, batch_size=batch_size, shuffle=True, num_workers=1),
-    'val': DataLoader(Radio_val, batch_size=batch_size, shuffle=True, num_workers=1)
-}
-
-def calc_loss_test(pred1, target, metrics, error="MSE"):
-    criterion = nn.MSELoss()
-    if error=="MSE":
-        #print("here")
-        loss1 = criterion(pred1, target)
-        #print(loss1)
-        #loss2 = criterion(pred2, target)
-    else:
-        loss1 = criterion(pred1, target)/criterion(target, 0*target)
-        #loss2 = criterion(pred2, target)/criterion(target, 0*target)
-    metrics['loss first U'] += loss1.data.cpu().numpy() * target.size(0)
-    #metrics['loss second U'] += loss2.data.cpu().numpy() * target.size(0)
-
-    return loss1
-
-def print_metrics_test(metrics, epoch_samples, error):
-    outputs = []
-    if error=="MSE":
-        for k in metrics.keys():
-            outputs.append("{}: {:4f}".format(k, metrics[k] / (epoch_samples*256**2)))
-    else:
-        for k in metrics.keys():
-            outputs.append("{}: {:4f}".format(k, metrics[k] / epoch_samples))
-    print("{}: {}".format("Test"+" "+error, ", ".join(outputs)))
-    #print('error=',outputs)
+def _torch_load_compat(path):
+    try:
+        return torch.load(path, map_location="cpu", weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
 
 
-def test_loss(model, error="MSE", dataset="coarse", path=''):
-    # dataset is "coarse" or "fine".
-    since = time.time()
-    l = []
-    lm = []
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    
-    model.to(device)
-    model.eval()   # Set model to evaluate mode
-    metrics = defaultdict(float)
-    epoch_samples = 0
-    if dataset=="coarse":
-        i = 0
-        for inputs, targets in DataLoader(Radio_test, batch_size=batch_size, shuffle=False, num_workers=1):
-            inputs = inputs.to(device)
-            targets = targets.to(device)
-            up_sampled = inputs[:,3,:,:]
-            inputs = inputs[:,:3,:,:]
-            # do not track history if only in train
-            with torch.set_grad_enabled(False):
-                [outputs1,_]= model(inputs)
-                loss1 = calc_loss_test(outputs1, targets, metrics, error)
-                for j in range(inputs.shape[0]):
-                    save_image(outputs1[j].to(torch.float)/255, os.path.join(path, f'test_out{i}{j}.png'), nrow=1, normalize=True)
-                    save_image(targets[j].to(torch.float)/255, os.path.join(path, f'test_outgt{i}{j}.png'), nrow=1, normalize=True)
+def _extract_generator_state_dict(obj):
+    if isinstance(obj, dict) and "netG" in obj:
+        return obj["netG"]
+    return obj
 
-                epoch_samples += inputs.size(0)
-            if i==3:
+
+def _predict_batch(mode, model, inputs, device):
+    inputs = inputs.to(device)
+
+    if mode == "model":
+        x = inputs[:, :3, :, :]
+        outputs, _ = model(x)
+        return outputs
+
+    if mode == "baseline_prior":
+        return inputs[:, 3:4, :, :]
+
+    if mode == "baseline_samples":
+        return inputs[:, 2:3, :, :]
+
+    raise ValueError(f"Unknown mode: {mode}")
+
+
+def evaluate_with_mode(mode, model, dataset, device, batch_size, num_workers, save_dir, save_images, max_batches, value_scale, value_offset, db_min, db_max, threshold_db):
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+
+    abs_err_sum = 0.0
+    sq_err_sum = 0.0
+    nmse_num = 0.0
+    nmse_den = 0.0
+    count = 0
+    within_thr_count = 0
+    total_px = 0
+    abs_err_samples = []
+    saved = []
+
+    infer_s = 0.0
+    with torch.inference_mode():
+        if model is not None:
+            model.to(device)
+            model.eval()
+
+        for bi, (inputs, targets) in enumerate(loader):
+            if max_batches is not None and bi >= max_batches:
                 break
-            i += 1
-    if dataset=="coarse":  
-        i=0
-        for inputs, targets in DataLoader(Radio_train, batch_size=batch_size, shuffle=False, num_workers=1):
-            inputs = inputs.to(device)
+
             targets = targets.to(device)
-            up_sampled = inputs[:,3,:,:]
-            inputs = inputs[:,:3,:,:]
-            # do not track history if only in train
-            with torch.set_grad_enabled(False):
-                [outputs1,_]= model(inputs)
-                loss1 = calc_loss_test(outputs1, targets, metrics, error)
-                epoch_samples += inputs.size(0)
-                for j in range(inputs.shape[0]):
-                    save_image(outputs1[j], os.path.join(path, f'train_out{i}{j}.png'), nrow=1, normalize=True)
-                    save_image(targets[j], os.path.join(path, f'train_outgt{i}{j}.png'), nrow=1, normalize=True)
-            if i == 3:
-                break
-            i +=1
-    print_metrics_test(metrics, epoch_samples, error)
-    #test_loss1 = metrics['loss U'] / epoch_samples
-    #test_loss2 = metrics['loss W'] / epoch_samples
-    time_elapsed = time.time() - since
-    print('{:.0f}m {:.0f}s'.format(time_elapsed // 60, time_elapsed % 60))
-    
-exp_index = 1           # REVISE index of experiment
 
-exp_path = f"{setup_name}_{exp_index}_test_{test_name}"
-os.makedirs(exp_path, exist_ok=True)
+            t0 = time.perf_counter()
+            outputs = _predict_batch(mode=mode, model=model, inputs=inputs, device=device)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            infer_s += time.perf_counter() - t0
 
-model = modules.RadioWNet(phase="firstU")
+            out_db = _to_db(outputs, value_scale, value_offset, db_min, db_max)
+            tgt_db = _to_db(targets, value_scale, value_offset, db_min, db_max)
 
-# REVISE weight path here
-model.load_state_dict(torch.load('uniform_1/Trained_ModelMSE_G.pt'))
-test_loss(model,error="MSE", path=exp_path)
-test_loss(model,error="NMSE",path=exp_path)
+            diff = (out_db - tgt_db).reshape(out_db.shape[0], -1)
+            abs_err = diff.abs()
+            sq_err = diff.square()
+
+            abs_err_sum += abs_err.sum().item()
+            sq_err_sum += sq_err.sum().item()
+            count += diff.numel()
+
+            mse_batch = ((outputs - targets) ** 2).mean().item()
+            nmse_num += mse_batch * outputs.numel()
+            nmse_den += ((targets - torch.zeros_like(targets)) ** 2).mean().item() * targets.numel()
+
+            if threshold_db is not None:
+                within_thr_count += (abs_err <= threshold_db).sum().item()
+                total_px += abs_err.numel()
+
+            abs_err_samples.append(abs_err.detach().cpu().flatten())
+
+            if save_images:
+                _ensure_dir(save_dir)
+                for j in range(min(outputs.shape[0], 4)):
+                    paths = {
+                        "in_buildings": f"in_buildings_b{bi}_i{j}.png",
+                        "in_tx": f"in_tx_b{bi}_i{j}.png",
+                        "in_samples": f"in_samples_b{bi}_i{j}.png",
+                        "in_prior": f"in_prior_b{bi}_i{j}.png",
+                        "pred": f"pred_b{bi}_i{j}.png",
+                        "gt": f"gt_b{bi}_i{j}.png",
+                    }
+                    save_image(inputs[j, 0:1].to(torch.float32), os.path.join(save_dir, paths["in_buildings"]), nrow=1, normalize=True)
+                    save_image(inputs[j, 1:2].to(torch.float32), os.path.join(save_dir, paths["in_tx"]), nrow=1, normalize=True)
+                    save_image(inputs[j, 2:3].to(torch.float32) / 255.0, os.path.join(save_dir, paths["in_samples"]), nrow=1, normalize=True)
+                    save_image(inputs[j, 3:4].to(torch.float32) / 255.0, os.path.join(save_dir, paths["in_prior"]), nrow=1, normalize=True)
+                    save_image(outputs[j].to(torch.float32) / 255.0, os.path.join(save_dir, paths["pred"]), nrow=1, normalize=True)
+                    save_image(targets[j].to(torch.float32) / 255.0, os.path.join(save_dir, paths["gt"]), nrow=1, normalize=True)
+                    saved.append({"batch": bi, "index": j, "paths": paths})
+
+    mae = abs_err_sum / max(count, 1)
+    rmse = float(np.sqrt(sq_err_sum / max(count, 1)))
+    nmse = float(nmse_num / max(nmse_den, 1e-12))
+
+    abs_err_all = torch.cat(abs_err_samples, dim=0) if abs_err_samples else torch.tensor([])
+    p90 = float(torch.quantile(abs_err_all, 0.90).item()) if abs_err_all.numel() else float("nan")
+    p95 = float(torch.quantile(abs_err_all, 0.95).item()) if abs_err_all.numel() else float("nan")
+
+    within = None
+    if threshold_db is not None and total_px > 0:
+        within = within_thr_count / total_px
+
+    return {
+        "mae": mae,
+        "rmse": rmse,
+        "p90": p90,
+        "p95": p95,
+        "nmse": nmse,
+        "infer_seconds": infer_s,
+        "pixels": count,
+        "within_threshold_ratio": within,
+        "saved_images": saved,
+    }
+
+
+def _write_metrics_json(out_dir, payload):
+    _ensure_dir(out_dir)
+    path = os.path.join(out_dir, "metrics.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset_dir", default=None)
+    parser.add_argument("--dataset", default="radiounet", choices=["radiounet", "radiomapseer_polygon"])
+    parser.add_argument("--setup", type=int, default=3, choices=[1, 2, 3])
+    parser.add_argument("--mode", default="model", choices=["model", "baseline_prior", "baseline_samples"])
+    parser.add_argument("--weights", default=None)
+    parser.add_argument("--batch_size", type=int, default=15)
+    parser.add_argument("--num_workers", type=int, default=1)
+    parser.add_argument("--out_dir", default="eval_out")
+    parser.add_argument("--save_images", action="store_true")
+    parser.add_argument("--max_batches", type=int, default=None)
+    parser.add_argument("--value_scale", type=float, default=1.0)
+    parser.add_argument("--value_offset", type=float, default=0.0)
+    parser.add_argument("--db_min", type=float, default=None)
+    parser.add_argument("--db_max", type=float, default=None)
+    parser.add_argument("--threshold_db", type=float, default=7.0)
+    args = parser.parse_args()
+
+    if args.dataset == "radiounet":
+        if args.setup == 1:
+            ds = loaders.RadioUNet_s(phase="test", fix_samples=655, num_samples_low=10, num_samples_high=300, dir_dataset=args.dataset_dir)
+        elif args.setup == 2:
+            ds = loaders.RadioUNet_s(phase="test", fix_samples=1, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
+        else:
+            ds = loaders.RadioUNet_s(phase="test", fix_samples=0, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
+    else:
+        if args.setup == 1:
+            ds = loaders.RadioMapSeerPolygon(phase="test", fix_samples=655, num_samples_low=10, num_samples_high=300, dir_dataset=args.dataset_dir)
+        elif args.setup == 2:
+            ds = loaders.RadioMapSeerPolygon(phase="test", fix_samples=1, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
+        else:
+            ds = loaders.RadioMapSeerPolygon(phase="test", fix_samples=0, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
+
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+    model = None
+    if args.mode == "model":
+        if args.weights is None:
+            raise SystemExit("--weights is required when --mode=model")
+        model = modules.RadioWNet(phase="firstU")
+        loaded = _torch_load_compat(args.weights)
+        state = _extract_generator_state_dict(loaded)
+        model.load_state_dict(state)
+
+    metrics = evaluate_with_mode(
+        mode=args.mode,
+        model=model,
+        dataset=ds,
+        device=device,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        save_dir=args.out_dir,
+        save_images=args.save_images,
+        max_batches=args.max_batches,
+        value_scale=args.value_scale,
+        value_offset=args.value_offset,
+        db_min=args.db_min,
+        db_max=args.db_max,
+        threshold_db=args.threshold_db,
+    )
+
+    print("device:", device)
+    print("mode:", args.mode)
+    for k in ["mae", "rmse", "p90", "p95", "nmse", "infer_seconds", "pixels", "within_threshold_ratio"]:
+        print(f"{k}: {metrics[k]}")
+
+    payload = {
+        "dataset": args.dataset,
+        "setup": args.setup,
+        "mode": args.mode,
+        "db_min": args.db_min,
+        "db_max": args.db_max,
+        "threshold_db": args.threshold_db,
+        "metrics": metrics,
+    }
+    _write_metrics_json(args.out_dir, payload)
+
+
+if __name__ == "__main__":
+    main()
 
 # with torch.no_grad():
 #     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
