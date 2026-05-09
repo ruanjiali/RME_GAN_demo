@@ -1,5 +1,2 @@
-*.png filter=lfs diff=lfs merge=lfs -text
-*.json filter=lfs diff=lfs merge=lfs -text
-*.pt filter=lfs diff=lfs merge=lfs -text
-*.pth filter=lfs diff=lfs merge=lfs -text
-*.ckpt filter=lfs diff=lfs merge=lfs -text
+radiomapseer_polygon_uniform_1/** filter=lfs diff=lfs merge=lfs -text
+demo_out_streamlit/** filter=lfs diff=lfs merge=lfs -text
