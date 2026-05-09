@@ -1,0 +1,12 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Dataset / outputs
+RadioMapSeer/
+radiomapseer_polygon_uniform_1/
+demo_out_streamlit/
+
+# Optional
+*.pt
+*.pth
