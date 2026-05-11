@@ -1,0 +1,68 @@
+{
+  "dataset": "urbanradio3d",
+  "setup": 1,
+  "mode": "baseline_prior",
+  "db_min": null,
+  "db_max": null,
+  "threshold_db": 7.0,
+  "metrics": {
+    "mae": 58.78511265345982,
+    "rmse": 77.84015931243792,
+    "p90": 131.0,
+    "p95": 151.0,
+    "nmse": 0.9809315825466353,
+    "infer_seconds": 0.003792899995460175,
+    "pixels": 458752,
+    "within_threshold_ratio": 0.2855922154017857,
+    "saved_images": [
+      {
+        "batch": 0,
+        "index": 0,
+        "paths": {
+          "in_buildings": "in_buildings_b0_i0.png",
+          "in_tx": "in_tx_b0_i0.png",
+          "in_samples": "in_samples_b0_i0.png",
+          "in_prior": "in_prior_b0_i0.png",
+          "pred": "pred_b0_i0.png",
+          "gt": "gt_b0_i0.png"
+        }
+      },
+      {
+        "batch": 0,
+        "index": 1,
+        "paths": {
+          "in_buildings": "in_buildings_b0_i1.png",
+          "in_tx": "in_tx_b0_i1.png",
+          "in_samples": "in_samples_b0_i1.png",
+          "in_prior": "in_prior_b0_i1.png",
+          "pred": "pred_b0_i1.png",
+          "gt": "gt_b0_i1.png"
+        }
+      },
+      {
+        "batch": 0,
+        "index": 2,
+        "paths": {
+          "in_buildings": "in_buildings_b0_i2.png",
+          "in_tx": "in_tx_b0_i2.png",
+          "in_samples": "in_samples_b0_i2.png",
+          "in_prior": "in_prior_b0_i2.png",
+          "pred": "pred_b0_i2.png",
+          "gt": "gt_b0_i2.png"
+        }
+      },
+      {
+        "batch": 0,
+        "index": 3,
+        "paths": {
+          "in_buildings": "in_buildings_b0_i3.png",
+          "in_tx": "in_tx_b0_i3.png",
+          "in_samples": "in_samples_b0_i3.png",
+          "in_prior": "in_prior_b0_i3.png",
+          "pred": "pred_b0_i3.png",
+          "gt": "gt_b0_i3.png"
+        }
+      }
+    ]
+  }
+}

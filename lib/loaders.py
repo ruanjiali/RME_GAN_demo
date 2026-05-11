@@ -6,7 +6,7 @@ import pandas as pd
 from skimage import io, transform
 import numpy as np
 import matplotlib.pyplot as plt
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, utils, datasets, models
 import warnings
@@ -394,6 +394,113 @@ class RadioMapSeerPolygon(Dataset):
                 )
             except Exception:
                 genImg = np.zeros((self.height, self.width), dtype=np.float32)
+
+        inputs = np.stack([image_buildings, image_Tx, image_samples, genImg], axis=2)
+
+        if self.transform:
+            inputs = self.transform(inputs).type(torch.float32)
+            image_gain_t = self.transform(image_gain).type(torch.float32)
+        else:
+            inputs = torch.from_numpy(np.transpose(inputs, (2, 0, 1))).type(torch.float32)
+            image_gain_t = torch.from_numpy(np.transpose(image_gain, (2, 0, 1))).type(torch.float32)
+
+        return [inputs, image_gain_t]
+
+
+class UrbanRadio3DPathloss(Dataset):
+    def __init__(
+        self,
+        phase="train",
+        dir_dataset=None,
+        fix_samples=655,
+        num_samples_low=10,
+        num_samples_high=300,
+        transform=transforms.ToTensor(),
+    ):
+        if dir_dataset is None:
+            dir_dataset = os.path.join(".", "UrbanRadio3D-main")
+        self.dir_dataset = os.path.normpath(dir_dataset)
+        self.phase = phase
+        self.fix_samples = fix_samples
+        self.num_samples_low = num_samples_low
+        self.num_samples_high = num_samples_high
+        self.transform = transform
+        self.height = 256
+        self.width = 256
+
+        self.pathloss_dir = os.path.join(self.dir_dataset, "pathloss")
+        if not os.path.isdir(self.pathloss_dir):
+            raise FileNotFoundError(f"pathloss directory not found: {self.pathloss_dir}")
+
+        files = []
+        for fn in os.listdir(self.pathloss_dir):
+            lower = fn.lower()
+            if lower.endswith(".gif") or lower.endswith(".png") or lower.endswith(".jpg") or lower.endswith(".jpeg"):
+                files.append(fn)
+        if len(files) == 0:
+            raise RuntimeError(f"No image files found in {self.pathloss_dir}")
+
+        files = sorted(files)
+        idx = np.arange(len(files))
+        np.random.seed(42)
+        np.random.shuffle(idx)
+        files = [files[i] for i in idx]
+
+        n = len(files)
+        n_train = int(n * 0.7)
+        n_val = int(n * 0.15)
+        if phase == "train":
+            self.files = files[:n_train]
+        elif phase == "val":
+            self.files = files[n_train:n_train + n_val]
+        elif phase == "test":
+            self.files = files[n_train + n_val:]
+        else:
+            self.files = files
+
+    def __len__(self):
+        return len(self.files)
+
+    def _tx_from_filename(self, stem):
+        parts = stem.split("_")
+        if len(parts) >= 3:
+            try:
+                x = int(parts[-2])
+                y = int(parts[-1])
+                return x, y
+            except Exception:
+                pass
+        return self.height // 2, self.width // 2
+
+    def __getitem__(self, idx):
+        fn = self.files[idx]
+        stem = os.path.splitext(fn)[0]
+        img_path = os.path.join(self.pathloss_dir, fn)
+
+        gain_img = Image.open(img_path).convert("L").resize((self.width, self.height), Image.BILINEAR)
+        gain = np.asarray(gain_img, dtype=np.float32)
+        image_gain = np.expand_dims(gain, axis=2)
+
+        tx_r, tx_c = self._tx_from_filename(stem)
+        tx_r = 0 if tx_r < 0 else (self.height - 1 if tx_r >= self.height else tx_r)
+        tx_c = 0 if tx_c < 0 else (self.width - 1 if tx_c >= self.width else tx_c)
+
+        image_buildings = np.zeros((self.height, self.width), dtype=np.float32)
+        image_Tx = np.zeros((self.height, self.width), dtype=np.float32)
+        image_Tx[tx_r, tx_c] = 1.0
+
+        image_samples = np.zeros((self.height, self.width), dtype=np.float32)
+        if self.fix_samples == 0:
+            num_samples = int(np.random.randint(self.num_samples_low, self.num_samples_high, size=1)[0])
+        else:
+            num_samples = int(np.floor(self.fix_samples))
+
+        x_samples = np.random.randint(0, self.height, size=num_samples)
+        y_samples = np.random.randint(0, self.width, size=num_samples)
+        image_samples[x_samples, y_samples] = image_gain[x_samples, y_samples, 0]
+
+        prior_img = Image.fromarray(np.clip(image_samples, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(radius=3))
+        genImg = np.asarray(prior_img, dtype=np.float32)
 
         inputs = np.stack([image_buildings, image_Tx, image_samples, genImg], axis=2)
 

@@ -165,7 +165,7 @@ def _write_metrics_json(out_dir, payload):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_dir", default=None)
-    parser.add_argument("--dataset", default="radiounet", choices=["radiounet", "radiomapseer_polygon"])
+    parser.add_argument("--dataset", default="radiounet", choices=["radiounet", "radiomapseer_polygon", "urbanradio3d"])
     parser.add_argument("--setup", type=int, default=3, choices=[1, 2, 3])
     parser.add_argument("--mode", default="model", choices=["model", "baseline_prior", "baseline_samples"])
     parser.add_argument("--weights", default=None)
@@ -188,13 +188,20 @@ def main():
             ds = loaders.RadioUNet_s(phase="test", fix_samples=1, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
         else:
             ds = loaders.RadioUNet_s(phase="test", fix_samples=0, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
-    else:
+    elif args.dataset == "radiomapseer_polygon":
         if args.setup == 1:
             ds = loaders.RadioMapSeerPolygon(phase="test", fix_samples=655, num_samples_low=10, num_samples_high=300, dir_dataset=args.dataset_dir)
         elif args.setup == 2:
             ds = loaders.RadioMapSeerPolygon(phase="test", fix_samples=1, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
         else:
             ds = loaders.RadioMapSeerPolygon(phase="test", fix_samples=0, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
+    else:
+        if args.setup == 1:
+            ds = loaders.UrbanRadio3DPathloss(phase="test", fix_samples=655, num_samples_low=10, num_samples_high=300, dir_dataset=args.dataset_dir)
+        elif args.setup == 2:
+            ds = loaders.UrbanRadio3DPathloss(phase="test", fix_samples=1, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
+        else:
+            ds = loaders.UrbanRadio3DPathloss(phase="test", fix_samples=0, num_samples_low=655, num_samples_high=655*10, dir_dataset=args.dataset_dir)
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 

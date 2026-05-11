@@ -1,0 +1,19 @@
+{
+  "dataset": "urbanradio3d",
+  "setup": 1,
+  "mode": "model",
+  "db_min": null,
+  "db_max": null,
+  "threshold_db": 7.0,
+  "metrics": {
+    "mae": 17.037946428571427,
+    "rmse": 31.381932438805453,
+    "p90": 51.496612548828125,
+    "p95": 76.41873931884766,
+    "nmse": 0.1594375662685213,
+    "infer_seconds": 1.0422707000107039,
+    "pixels": 458752,
+    "within_threshold_ratio": 0.5398319789341518,
+    "saved_images": []
+  }
+}

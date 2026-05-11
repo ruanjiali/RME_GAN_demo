@@ -116,6 +116,55 @@ streamlit run streamlit_app.py
 - 图像含义在页面直接说明，且标题含具体文件名
 - 支持“预测与真值使用彩色热力图”开关（避免黑白图不直观）
 
+### 网页 Demo 演示文档（可直接照着讲）
+
+本节用于快速答辩演示。当前可先复用同一个 `checkpoint_last.pt` 进行展示，不影响流程完整性。
+
+#### 1) 启动网页
+
+```bash
+streamlit run streamlit_app.py
+```
+
+#### 2) 演示配置（推荐）
+
+- `数据集`：先选 `urbanradio3d`
+- `dataset_dir`：`D:\RME-GAN\UrbanRadio3D-main(1)\UrbanRadio3D-main`
+- `模式`：先选 `model`
+- `weights`：`D:\RME-GAN\UrbanRadio3D-main(1)\UrbanRadio3D-main\checkpoint_last.pt`
+- `setup`：`1`
+- `max_batches`：`1`（演示更快）
+- 勾选：`保存图片到 out_dir`、`预测与真值使用彩色热力图`
+- 点击：`运行 Demo`
+
+#### 3) 页面讲解顺序（建议 2-3 分钟）
+
+1. 左侧指标区：先讲 `rmse`、`p95`、`≤7dB占比`、`infer_seconds`。  
+2. 右侧样例区：按“输入通道 -> 预测 -> 真值”解释每张图。  
+3. 强调彩色热力图：更直观看覆盖强弱变化。  
+4. 下载 `metrics.json`：说明结果可复现、可归档。  
+
+#### 4) 输出文件说明（答辩可展示目录）
+
+运行后在 `out_dir`（默认 `demo_out_streamlit`）生成：
+
+- `in_buildings_*.png`：环境/建筑输入
+- `in_tx_*.png`：发射点位输入
+- `in_samples_*.png`：稀疏测量输入
+- `in_prior_*.png`：先验图输入
+- `pred_*.png`：预测覆盖图
+- `gt_*.png`：真值覆盖图
+- `metrics.json`：指标与配置
+
+#### 5) 备用演示方案（无需模型）
+
+如果现场权重加载异常，可切到：
+
+- `模式 = baseline_prior`（最稳）
+- 或 `模式 = baseline_samples`
+
+这样无需模型也能完整演示“输入 -> 输出 -> 指标 -> 导出结果”的流程。
+
 ### 关于 dB 映射（必须补齐才能对齐“<7 dB”）
 
 本仓库的标签/输出来自 RadioMapSeer 的图像归一化流程（0~256 的连续值），并不直接等同于路径损耗(dB)或 RSRP(dBm)。为了按比赛口径评测，你需要明确“模型输出值 → dB”的映射。

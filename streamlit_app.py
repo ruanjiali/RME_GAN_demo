@@ -22,11 +22,18 @@ def _make_dataset(dataset_name, dataset_dir, setup):
             return loaders.RadioUNet_s(phase="test", fix_samples=1, num_samples_low=655, num_samples_high=655 * 10, dir_dataset=dataset_dir)
         return loaders.RadioUNet_s(phase="test", fix_samples=0, num_samples_low=655, num_samples_high=655 * 10, dir_dataset=dataset_dir)
 
+    if dataset_name == "radiomapseer_polygon":
+        if setup == 1:
+            return loaders.RadioMapSeerPolygon(phase="test", fix_samples=655, num_samples_low=10, num_samples_high=300, dir_dataset=dataset_dir)
+        if setup == 2:
+            return loaders.RadioMapSeerPolygon(phase="test", fix_samples=1, num_samples_low=655, num_samples_high=655 * 10, dir_dataset=dataset_dir)
+        return loaders.RadioMapSeerPolygon(phase="test", fix_samples=0, num_samples_low=655, num_samples_high=655 * 10, dir_dataset=dataset_dir)
+
     if setup == 1:
-        return loaders.RadioMapSeerPolygon(phase="test", fix_samples=655, num_samples_low=10, num_samples_high=300, dir_dataset=dataset_dir)
+        return loaders.UrbanRadio3DPathloss(phase="test", fix_samples=655, num_samples_low=10, num_samples_high=300, dir_dataset=dataset_dir)
     if setup == 2:
-        return loaders.RadioMapSeerPolygon(phase="test", fix_samples=1, num_samples_low=655, num_samples_high=655 * 10, dir_dataset=dataset_dir)
-    return loaders.RadioMapSeerPolygon(phase="test", fix_samples=0, num_samples_low=655, num_samples_high=655 * 10, dir_dataset=dataset_dir)
+        return loaders.UrbanRadio3DPathloss(phase="test", fix_samples=1, num_samples_low=655, num_samples_high=655 * 10, dir_dataset=dataset_dir)
+    return loaders.UrbanRadio3DPathloss(phase="test", fix_samples=0, num_samples_low=655, num_samples_high=655 * 10, dir_dataset=dataset_dir)
 
 
 def _load_model(weights_path):
@@ -71,8 +78,14 @@ st.title("无线网络覆盖预测 Demo（Streamlit）")
 
 with st.sidebar:
     st.subheader("配置")
-    dataset_name = st.selectbox("数据集", ["radiomapseer_polygon", "radiounet"])
-    dataset_dir = st.text_input("dataset_dir", value=r"D:\RME-GAN\RadioMapSeer" if dataset_name == "radiomapseer_polygon" else "")
+    dataset_name = st.selectbox("数据集", ["radiomapseer_polygon", "radiounet", "urbanradio3d"])
+    if dataset_name == "radiomapseer_polygon":
+        default_dir = r"D:\RME-GAN\RadioMapSeer"
+    elif dataset_name == "urbanradio3d":
+        default_dir = r"D:\RME-GAN\UrbanRadio3D-main(1)\UrbanRadio3D-main"
+    else:
+        default_dir = ""
+    dataset_dir = st.text_input("dataset_dir", value=default_dir)
     setup = st.selectbox("setup（稀疏采样）", [1, 2, 3], index=0)
 
     mode = st.selectbox("模式", ["baseline_prior", "baseline_samples", "model"], index=0)
